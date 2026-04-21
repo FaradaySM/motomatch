@@ -26,14 +26,12 @@ export default function CalibradorPage() {
               MotoMatch
             </p>
             <h1 className="mt-2 text-3xl font-semibold tracking-tight text-white sm:text-4xl">
-              Calibrador ergonómico (interno)
+              Calibrador (interno)
             </h1>
             <p className="mt-2 max-w-3xl text-sm leading-relaxed text-zinc-400 sm:text-base">
-              Marca 3 puntos sobre la imagen (en este orden):{" "}
-              <span className="font-semibold text-zinc-200">manillar</span>,{" "}
-              <span className="font-semibold text-zinc-200">asiento</span>,{" "}
-              <span className="font-semibold text-zinc-200">estriberas</span>. Se guardan en
-              porcentaje (X/Y) para que funcione a cualquier tamaño.
+              Herramienta interna para calibrar puntos ergonómicos y medir el ángulo de dirección
+              a partir de una imagen. Todo se guarda en porcentaje (X/Y) para que funcione a
+              cualquier tamaño.
             </p>
           </div>
 
