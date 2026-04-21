@@ -12,19 +12,25 @@ export type MotoErgonomiaInput = {
 export type PosicionRelativaManillar = "bajo" | "medio" | "alto";
 export type PosicionRelativaEstriberas = "adelantadas" | "centrales" | "retrasadas";
 
+export type ClasificacionPostura =
+  | "muy_erguido"
+  | "erguido"
+  | "neutro"
+  | "deportivo"
+  | "muy_deportivo";
+
 export type PuntosErgonomicos = {
   altura_manillar_mm: number;
-  altura_estriberas_mm: number;
-  distancia_horizontal_manillar_mm: number;
+  distancia_horizontal_asiento_manillar_mm: number;
+  diferencia_altura_asiento_manillar_mm: number;
+  angulo_brazos_grados: number;
   posicion_relativa_manillar: PosicionRelativaManillar;
-  posicion_relativa_estriberas: PosicionRelativaEstriberas;
+  clasificacion_postura: ClasificacionPostura;
 };
 
 export type AlcanceSuelo = "completo" | "punta_pie" | "no_alcanza";
 
 export type PosturaPiloto = {
-  angulo_rodilla_grados: number;
-  angulo_cadera_grados: number;
   angulo_codo_grados: number;
   alcance_suelo: AlcanceSuelo;
   comodidad_score: number; // 1..10
@@ -62,78 +68,21 @@ function validateMoto(moto: MotoErgonomiaInput) {
   }
 }
 
-function footpegDeltaFromSeatMm(tipo: TipoMoto): number {
-  // Delta = altura_estriberas - altura_asiento (negativo: estriberas más bajas).
+function seatCenterRatio(tipo: TipoMoto): number {
   switch (tipo) {
-    case "sport":
-      return -170;
     case "naked":
-      return -200;
-    case "touring":
-      return -210;
+      return 0.6;
     case "adventure":
-      return -230;
-    case "enduro":
-      return -240;
+      return 0.62;
     case "cruiser":
-      return -260;
-  }
-}
-
-function horizontalBarDistanceMm(tipo: TipoMoto): number {
-  // Distancia horizontal desde el asiento al manillar (aprox).
-  switch (tipo) {
-    case "cruiser":
-      return 320;
-    case "naked":
-      return 420;
-    case "adventure":
-      return 450;
-    case "touring":
-      return 480;
-    case "enduro":
-      return 440;
+      return 0.55;
     case "sport":
-      return 540;
-  }
-}
-
-function handlebarBaseRiseMm(tipo: TipoMoto): number {
-  // Ajuste base de altura del manillar respecto a altura del asiento.
-  switch (tipo) {
-    case "sport":
-      return -30;
-    case "naked":
-      return 40;
+      return 0.58;
     case "touring":
-      return 80;
-    case "adventure":
-      return 90;
+      return 0.65;
     case "enduro":
-      return 120;
-    case "cruiser":
-      return 70;
-  }
-}
-
-function footpegHorizontalOffsetMm(tipo: TipoMoto, wheelbase_mm: number): number {
-  // Positivo = estriberas adelantadas respecto a la vertical del asiento.
-  // Valores aproximados, limitados por wheelbase.
-  const wb = Math.max(1200, wheelbase_mm);
-  switch (tipo) {
-    case "cruiser":
-      return clamp(wb * 0.18, 180, 320);
-    case "touring":
-      return clamp(wb * 0.06, 60, 140);
-    case "adventure":
-      return clamp(wb * 0.05, 50, 120);
-    case "naked":
-      return clamp(wb * 0.05, 50, 120);
-    case "enduro":
-      return clamp(wb * 0.04, 40, 110);
-    case "sport":
-      // retrasadas
-      return -clamp(wb * 0.05, 60, 140);
+      // Similar a adventure pero algo más centrada.
+      return 0.6;
   }
 }
 
@@ -143,47 +92,82 @@ function relativeBarPosition(diffMm: number): PosicionRelativaManillar {
   return "alto";
 }
 
-function relativePegPosition(tipo: TipoMoto): PosicionRelativaEstriberas {
-  switch (tipo) {
-    case "cruiser":
-      return "adelantadas";
-    case "sport":
-      return "retrasadas";
-    default:
-      return "centrales";
-  }
+function classifyPosture(args: {
+  distanciaHorizontalMm: number;
+  diffAlturaMm: number;
+}): ClasificacionPostura {
+  const { distanciaHorizontalMm, diffAlturaMm } = args; // diffAltura = manillar - asiento
+
+  // Heurística:
+  // - Más alto y cerca => erguido
+  // - Similar altura => neutro
+  // - Más bajo y lejos => deportivo
+  if (diffAlturaMm >= 140 && distanciaHorizontalMm <= 360) return "muy_erguido";
+  if (diffAlturaMm >= 60 && distanciaHorizontalMm <= 440) return "erguido";
+  if (Math.abs(diffAlturaMm) <= 60) return "neutro";
+  if (diffAlturaMm <= -140 && distanciaHorizontalMm >= 500) return "muy_deportivo";
+  return "deportivo";
 }
 
 export function calcularPuntosErgonomicos(moto: MotoErgonomiaInput): PuntosErgonomicos {
   validateMoto(moto);
 
-  // Interpretación: angulo_direccion_grados es el rake respecto a la vertical (lo habitual).
-  // Usamos el trail para obtener un pequeño componente vertical asociado a la inclinación.
-  const rakeRad = toRad(clamp(moto.angulo_direccion_grados, 15, 40));
-  const trail = clamp(moto.trail_mm, 70, 150);
+  // Sistema de coordenadas 2D (perfil):
+  // - x: hacia delante (desde el eje trasero)
+  // - y: hacia arriba (desde el suelo)
+  //
+  // Suponemos que angulo_direccion_grados es el "caster" respecto a la vertical:
+  // - 0° = horquilla totalmente vertical
+  // - típicamente 23°–30°
+  const casterRad = toRad(clamp(moto.angulo_direccion_grados, 0, 45));
+  const trail = clamp(moto.trail_mm, 70, 160);
+  const wheelbase = clamp(moto.wheelbase_mm, 1200, 2000);
 
-  const trailVerticalComponent = trail * Math.cos(rakeRad); // mm
+  // Punto de contacto de la rueda delantera (aprox) desde eje trasero.
+  const xContactoDelantero = wheelbase;
+  const ySuelo = 0;
 
-  const baseRise = handlebarBaseRiseMm(moto.tipo);
-  const altura_manillar_mm = Math.round(
-    moto.altura_asiento_mm + baseRise + trailVerticalComponent * 0.25
-  );
+  // Trail: el contacto suele quedar "detrás" (hacia atrás) del punto donde el eje de dirección
+  // intersecta el suelo. Por tanto, el eje intersecta el suelo por delante del contacto.
+  const xInterseccionEjeDireccion = xContactoDelantero + trail;
 
-  const altura_estriberas_mm = Math.round(
-    clamp(moto.altura_asiento_mm + footpegDeltaFromSeatMm(moto.tipo), moto.altura_suelo_mm + 60, moto.altura_asiento_mm)
-  );
+  // Proyección hacia arriba a lo largo del eje de dirección.
+  // Vector unitario "hacia arriba" sobre el eje (inclinado hacia atrás):
+  const ux = -Math.sin(casterRad);
+  const uy = Math.cos(casterRad);
 
-  const distancia_horizontal_manillar_mm = Math.round(horizontalBarDistanceMm(moto.tipo));
+  const forkExpuestaMm = 350;
+  const xManillar = xInterseccionEjeDireccion + ux * forkExpuestaMm;
+  const yManillar = ySuelo + uy * forkExpuestaMm;
 
-  const posicion_relativa_manillar = relativeBarPosition(altura_manillar_mm - moto.altura_asiento_mm);
-  const posicion_relativa_estriberas = relativePegPosition(moto.tipo);
+  // Centro del asiento típico según proporción del wheelbase desde el eje trasero.
+  const xAsiento = wheelbase * seatCenterRatio(moto.tipo);
+  const yAsiento = moto.altura_asiento_mm;
+
+  const distanciaHorizontal = Math.round(xManillar - xAsiento);
+  const diffAltura = Math.round(yManillar - yAsiento);
+
+  const posicion_relativa_manillar = relativeBarPosition(diffAltura);
+
+  // Ángulo de brazos: vector hombro->manillar respecto a horizontal (aprox).
+  // Hombro estimado encima del asiento y ligeramente adelantado.
+  // Nota: aquí no usamos altura del piloto; es una estimación de "setup" de la moto.
+  const shoulderX = xAsiento + 80;
+  const shoulderY = yAsiento + 520; // ~torso promedio (aprox) para una referencia consistente
+  const anguloBrazos = (Math.atan2(yManillar - shoulderY, xManillar - shoulderX) * 180) / Math.PI;
+
+  const clasificacion_postura = classifyPosture({
+    distanciaHorizontalMm: Math.abs(distanciaHorizontal),
+    diffAlturaMm: diffAltura,
+  });
 
   return {
-    altura_manillar_mm,
-    altura_estriberas_mm,
-    distancia_horizontal_manillar_mm,
+    altura_manillar_mm: Math.round(yManillar),
+    distancia_horizontal_asiento_manillar_mm: distanciaHorizontal,
+    diferencia_altura_asiento_manillar_mm: diffAltura,
+    angulo_brazos_grados: Number(anguloBrazos.toFixed(2)),
     posicion_relativa_manillar,
-    posicion_relativa_estriberas,
+    clasificacion_postura,
   };
 }
 
@@ -223,28 +207,12 @@ export function calcularPosturaPiloto(
   const brazo_mm = 0.33 * altura_mm;
   const torso_mm = 0.3 * altura_mm;
 
-  // Pierna: asumimos muslo y tibia ~50/50 de la entrepierna
-  const muslo = inseam_mm * 0.5;
-  const tibia = inseam_mm * 0.5;
-
-  // Coordenadas relativas (origen en la cadera/altura del asiento)
-  const pegX = footpegHorizontalOffsetMm(moto.tipo, moto.wheelbase_mm);
-  const pegY = p.altura_estriberas_mm - moto.altura_asiento_mm; // negativo (hacia abajo)
-  const dHipPeg = Math.sqrt(pegX * pegX + pegY * pegY);
-
-  const anguloRodilla = angleFromSegmentsDeg(muslo, tibia, dHipPeg);
-
-  // Cadera: aproximamos como flexión entre torso (vertical) y muslo (hacia estribera).
-  // 0° = totalmente extendida hacia abajo, 180° = muslo hacia arriba (muy plegado).
-  const thighAngleFromVertical = (Math.atan2(Math.abs(pegX), Math.abs(pegY) + 1e-6) * 180) / Math.PI;
-  const anguloCadera = clamp(90 + thighAngleFromVertical, 60, 160);
-
-  // Brazo: asumimos hombro por encima del asiento (torso) y algo adelantado.
+  // Brazo: estimamos hombro encima del asiento y ligeramente adelantado.
   const shoulderY = moto.altura_asiento_mm + torso_mm * 0.9;
-  const shoulderX = 60; // ligero adelantamiento del hombro respecto a cadera
+  const shoulderX = 80;
 
-  const barX = shoulderX + p.distancia_horizontal_manillar_mm;
-  const barY = p.altura_manillar_mm;
+  const barX = shoulderX + p.distancia_horizontal_asiento_manillar_mm;
+  const barY = moto.altura_asiento_mm + p.diferencia_altura_asiento_manillar_mm;
 
   const dShoulderBar = Math.sqrt((barX - shoulderX) ** 2 + (barY - shoulderY) ** 2);
   const upperArm = brazo_mm * 0.5;
@@ -256,24 +224,15 @@ export function calcularPosturaPiloto(
   const advertencias: string[] = [];
 
   // Validaciones geométricas básicas (si la distancia supera longitudes, quedan "estirados")
-  if (dHipPeg > muslo + tibia + 20) {
-    advertencias.push("La distancia asiento-estriberas parece demasiado larga para tu pierna (postura estirada).");
-  }
   if (dShoulderBar > upperArm + foreArm + 20) {
     advertencias.push("El alcance al manillar parece largo para tu brazo (puede cargar muñecas/hombros).");
   }
 
   // Rangos típicos (aprox) de comodidad:
-  // rodilla: 85–130; codo: 90–140; cadera: 85–125
-  const rodillaPenalty =
-    anguloRodilla < 80 ? 3 : anguloRodilla > 135 ? 2 : anguloRodilla < 90 ? 1 : 0;
+  // codo: 90–140
   const codoPenalty =
     anguloCodo < 85 ? 3 : anguloCodo > 150 ? 2 : anguloCodo < 95 ? 1 : 0;
-  const caderaPenalty =
-    anguloCadera < 80 ? 2 : anguloCadera > 135 ? 2 : anguloCadera < 90 ? 1 : 0;
 
-  if (anguloRodilla < 85) advertencias.push("Rodilla muy cerrada: puede fatigar en trayectos largos.");
-  if (anguloRodilla > 140) advertencias.push("Rodilla muy abierta: puede reducir control en conducción off-road.");
   if (anguloCodo < 90) advertencias.push("Codo muy cerrado: postura compacta, puede cargar hombros.");
   if (anguloCodo > 150) advertencias.push("Codo muy abierto: puedes ir muy estirado hacia el manillar.");
   if (alcance_suelo === "no_alcanza") advertencias.push("No alcanzas el suelo cómodamente: ojo en maniobras y paradas.");
@@ -283,15 +242,13 @@ export function calcularPosturaPiloto(
   const weightPenalty = peso_piloto_kg > 105 ? 1 : 0;
 
   let comodidad = 10;
-  comodidad -= rodillaPenalty + codoPenalty + caderaPenalty + weightPenalty;
+  comodidad -= codoPenalty + weightPenalty;
   if (alcance_suelo === "no_alcanza") comodidad -= 2;
   if (moto.tipo === "sport") comodidad -= 1;
   if (moto.tipo === "cruiser" && moto.altura_asiento_mm < 700) comodidad += 0.5;
   comodidad = clamp(Math.round(comodidad), 1, 10);
 
   return {
-    angulo_rodilla_grados: Math.round(anguloRodilla),
-    angulo_cadera_grados: Math.round(anguloCadera),
     angulo_codo_grados: Math.round(anguloCodo),
     alcance_suelo,
     comodidad_score: comodidad,
